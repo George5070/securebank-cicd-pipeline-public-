@@ -1,0 +1,138 @@
+name: SecureBank CI/CD Pipeline
+
+# Triggers: run on every push and pull request targeting main.
+# This is the "code commit" stage of the pipeline diagram.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ---------------------------------------------------------------------
+  # STAGE: Build & Test
+  # Installs dependencies, runs the unit test suite.
+  # ---------------------------------------------------------------------
+  build-and-test:
+    name: Build & Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history improves SonarCloud's analysis
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+  # ---------------------------------------------------------------------
+  # STAGE: SAST (Static Application Security Testing)
+  # Scans source code for vulnerable patterns BEFORE the app ever runs.
+  # Runs SonarCloud's analysis and lets it evaluate the configured
+  # Quality Gate. See sonar-project.properties for project configuration.
+  # ---------------------------------------------------------------------
+  sast-scan:
+    name: SAST - SonarCloud
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # STAGE: DAST (Dynamic Application Security Testing)
+  # Starts the real running application, then attacks it externally with
+  # OWASP ZAP's baseline scan - exactly as an attacker would probe a live
+  # pre-production environment, rather than reading the source code.
+  # ---------------------------------------------------------------------
+  dast-scan:
+    name: DAST - OWASP ZAP Baseline
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start application in background
+        run: nohup npm start > app.log 2>&1 &
+
+      - name: Wait for application to be ready
+        run: |
+          for i in {1..10}; do
+            if curl -s http://localhost:3000/health; then
+              echo "App is up"
+              exit 0
+            fi
+            echo "Waiting for app..."
+            sleep 2
+          done
+          echo "App failed to start" && cat app.log && exit 1
+
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: "http://localhost:3000"
+          fail_action: false # report findings without failing the build, for lab purposes
+          cmd_options: "-a"
+
+      - name: Upload ZAP report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-baseline-report
+          path: report_html.html
+
+  # ---------------------------------------------------------------------
+  # STAGE: Staging deployment (simulated)
+  # In a real pipeline this would deploy to a staging environment for
+  # further manual/automated verification before production. Only runs
+  # if both security scans have completed.
+  # ---------------------------------------------------------------------
+  deploy-staging:
+    name: Deploy to Staging (simulated)
+    needs: [sast-scan, dast-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Simulated staging deployment
+        run: echo "Deploying build to staging environment... (simulated for this assignment)"
+
+  # ---------------------------------------------------------------------
+  # STAGE: Production deployment (manual gate, simulated)
+  # Only triggered on main branch pushes, after staging succeeds. A real
+  # bank would require manual approval here (a GitHub Environment with
+  # required reviewers) before this stage runs.
+  # ---------------------------------------------------------------------
+  deploy-production:
+    name: Deploy to Production (simulated)
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Simulated production deployment
+        run: echo "Deploying build to production environment... (simulated for this assignment)"
